@@ -4,61 +4,94 @@ require 'nokogiri'
 require 'json'
 require 'open-uri'
 require 'sqlite3'
-require 'pp'
 
+# See api.github.com for documentation on the GitHub API. This script
+# blindly takes all parts of the API and sticks them in the database,
+# except for handling owner type (organization or user).
+
+# Given a repo name, gets info using the GitHub API
 class Repo
-  def initialize(full_name, options = {})
-    @full_name = full_name
-    @owner_login = /\w+/.match(full_name)
-    @name = /\/(\w+)/.match(full_name)
-    @html_url = 'https://github.com/' + full_name
-    @api_url = 'https://api.github.com/repos/' + full_name
-    rate_limited = JSON.parse(open('https://api.github.com/rate_limit', http_basic_authentication: ['nloveladyallen', 'ked6tAy1Che7He']).read)['resources']['core']['remaining'] == 0
+  # Full name is in the form "nloveladyallen/github_trending"
+  def initialize(full_name)
+    # GitHub login, uses MORPH_ prefix to make morph.io happy
+    @login = [ENV['MORPH_UNAME'], ENV['MORPH_PWD']]
+    abort 'Set $MORPH_UNAME and $MORPH_PWD' if @login == [nil, nil]
+    @api_url = "https://api.github.com/repos/#{full_name}"
+    # Check if rate limited
+    rate_limit_url = 'https://api.github.com/rate_limit'
+    rate_limit_page = open(rate_limit_url, http_basic_authentication: @login)
+    rate_limit_json = JSON.parse(rate_limit_page.read)
+    rate_limited = rate_limit_json['resources']['core']['remaining'] == 0
     info unless rate_limited
   end
 
-  def info
-    # CONTAINS GITHUB PASSWORD, DO NOT POST TO GITHUB AS IS
-    @api_hash = JSON.parse(open(@api_url, http_basic_authentication: ['nloveladyallen', 'ked6tAy1Che7He']).read)
-    @api_arr = []
-    @api_hash.each do |p|
-      @api_arr.push(p[1])
-    end
-    # p @api_arr
+  # Escape single and double quotes with &quot; and &apos;
+  def escape(s)
+    s.to_s.gsub('"', '&quot;').gsub("'", '&apos;')
   end
 
-  attr_reader :api_hash, :api_arr
-end
-time = Time.now
-# get the raw html of github.com/trending
-trending_page_html = Nokogiri::HTML(open('https://github.com/trending'))
-# get an array of html snippets, each representing one repo
-repo_html_list = trending_page_html.css('.repo-list-name a')
-repo_name_list = repo_html_list.map do |f|
-  f.content.delete("\n").delete(' ')
-end
-# This is to prevent rate limiting, fix before GitHubbing
-repo_name_list = [repo_name_list[0], repo_name_list[1]]
-repo_object_list = repo_name_list.map do |f|
-  Repo.new(f)
+  # Retrieve, sort and save parsed JSON into appropriate variables
+  def info
+    # Get raw JSON of GitHub API
+    api_page = open(@api_url, http_basic_authentication: @login)
+    # Parse the JSON into a hash
+    @api_hash = JSON.parse(api_page.read)
+    # Consistency between repos owned by organizations and individuals
+    @api_hash['organization'] = @api_hash['owner']
+    # Alphebatize the API hash
+    @api_sort = @api_hash.sort_by { |k| k }
+    # Convert to array because SQLite
+    @api_arr = []
+    @api_sort.each do |p|
+      if p[1].class == Hash
+        p[1].each { |q| @api_arr.push escape q[1] }
+      else
+        @api_arr.push escape p[1]
+      end
+    end
+  end
+  # Repos are read-only
+  attr_reader :api_sort, :api_arr
 end
 
-# In the future, this should not delete old data.sqlite
-File.delete('./data.sqlite')
+# Get the raw HTML of https://github.com/trending
+trending_page_html = Nokogiri::HTML(open('https://github.com/trending'))
+# Get an array of HTML snippets, each representing one repo
+repo_html_list = trending_page_html.css '.repo-list-name a'
+# Remove extraneous HTML to get an array of full names ("owner/repo")
+repo_name_list = repo_html_list.map { |f| f.content.delete("\n").delete(' ') }
+# Turn these names into Repos
+repo_object_list = repo_name_list.map { |f| Repo.new f }
+
+# Delete old database (possible improvement: allow storage of historical data)
+File.delete './data.sqlite'
+# Create new database data.sqlite
 db = SQLite3::Database.new 'data.sqlite'
-create_execute = 'create table data('
-repo_object_list[0].api_hash.each do |p|
-  create_execute += p[0]
-  create_execute += ', ' if repo_object_list[0].api_arr.index(p[1]) < repo_object_list[0].api_arr.length - 1
+# Create SQL command to create the data table
+create_execute = 'CREATE TABLE data('
+# Add the indexes of the sorted hash of the GitHub API as table columns
+repo_object_list[0].api_sort.each_with_index do |p, i|
+  # Deal with the hashes in the API data, e.g.
+  # {"owner"=>{"login"=>"nloveladyallen"}} to {"owner_login"=>"nloveladyallen"}
+  if p[1].class == Hash
+    p[1].each { |q| create_execute += "#{p[0]}_#{q[0]}, " }
+  else
+    create_execute += p[0]
+  end
+  # Is this the last item in the hash?
+  create_execute += ', ' if i < repo_object_list[0].api_sort.length - 1
 end
 create_execute += ');'
-pp create_execute
 db.execute create_execute
-repo_object_list.each do |f|
-  p f.api_arr.length # for debug
-  db.execute 'insert into data values ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? );', f.api_arr
-end
 
-db.execute('select * from data') do |r|
-  # pp r
+repo_object_list.each do |o|
+  # Create SQL command to insert data into the data table
+  insert_execute = 'INSERT INTO data VALUES ('
+  # Add the values of the array of the GitHub API as row values
+  o.api_arr.each_with_index do |p, i|
+    insert_execute += "\"#{p}\""
+    insert_execute += ', ' if i < o.api_arr.length - 1
+  end
+  insert_execute += ');'
+  db.execute insert_execute
 end
