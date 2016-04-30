@@ -74,7 +74,10 @@ repo_object_list[0].api_sort.each_with_index do |p, i|
   # Deal with the hashes in the API data, e.g.
   # {"owner"=>{"login"=>"nloveladyallen"}} to {"owner_login"=>"nloveladyallen"}
   if p[1].class == Hash
-    p[1].each { |q| create_execute += "#{p[0]}_#{q[0]}, " }
+    p[1].each_with_index do |q, j|
+      create_execute += "#{p[0]}_#{q[0]}"
+      create_execute += ', ' if j < p[1].length - 1
+    end
   else
     create_execute += p[0]
   end
