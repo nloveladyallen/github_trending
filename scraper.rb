@@ -48,9 +48,12 @@ class Repo
 
   # Sort and save parsed JSON into appropriate variables
   def info
-    fetch_json
     # Consistency between repos owned by organizations and individuals
     @api_hash['organization'] = @api_hash['owner']
+    # Consistency between repos with and without licenses listed
+    @api_hash['license'] ||= {
+      'key' => nil, 'name' => nil, 'spdx_id' => nil, 'url' => nil
+    }
     # Alphebatize the API hash
     @api_sort = @api_hash.sort
     # Convert to array because SQLite
