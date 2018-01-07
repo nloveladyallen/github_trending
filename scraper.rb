@@ -7,9 +7,9 @@ require 'json'
 require 'open-uri'
 require 'sqlite3'
 
-# See api.github.com for documentation on the GitHub API. This script
-# blindly takes all parts of the API and sticks them in the database,
-# except for handling owner type (organization or user).
+# See api.github.com for documentation on the GitHub API. This script blindly
+# takes all parts of the API and sticks them in the database, except for
+# handling owner type (organization or user), license, and parent (for forks).
 
 # Given a repo name, gets info using the GitHub API
 class Repo
@@ -48,18 +48,26 @@ class Repo
 
   # Sort and save parsed JSON into appropriate variables
   def info
-    # Consistency between repos owned by organizations and individuals
-    @api_hash['organization'] = @api_hash['owner']
-    # Consistency between repos with and without licenses listed
-    @api_hash['license'] ||= {
-      'key' => nil, 'name' => nil, 'spdx_id' => nil, 'url' => nil
-    }
+    standardize
     # Alphebatize the API hash
     @api_sort = @api_hash.sort
     # Convert to array because SQLite
     @api_arr = @api_sort.flat_map do |_, v|
       v.is_a?(Hash) ? v.map { |_, w| escape(w) } : escape(v)
     end
+  end
+
+  # Enforce consistency between difference types of repos
+  def standardize
+    # Consistency between repos owned by organizations and individuals
+    @api_hash['organization'] = @api_hash['owner']
+    # Consistency between repos with and without licenses listed
+    @api_hash['license'] ||= {
+      'key' => nil, 'name' => nil, 'spdx_id' => nil, 'url' => nil
+    }
+    # Consistency between forks and original repos
+    @api_hash['parent'] = @api_hash['parent']&.[]('full_name')
+    @api_hash['source'] = @api_hash['source']&.[]('full_name')
   end
 
   def rate_limited?
@@ -102,6 +110,7 @@ create_execute += ');'
 db.execute(create_execute)
 
 repo_object_list.each do |repo|
+  puts 'Inserting ' + repo.api_sort.find { |p| p[0] == 'full_name' }[1]
   # Create SQL command to insert data into the data table
   insert_execute = 'INSERT INTO data VALUES ('
   # Add the values of the array of the GitHub API as row values
